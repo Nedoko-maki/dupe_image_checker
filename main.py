@@ -12,14 +12,13 @@ GIFs and MP4s do not work.
 Additionally, the images should be in folders in the same directory as this .py file. (PIL should be installed too)
 """)
 
-folders = os.listdir(os.getcwd())
+folders = [_ for _ in os.listdir(os.getcwd()) if os.path.isdir(os.path.join(os.getcwd(), _))]
 
 for num, folder in enumerate(folders):
-    if os.path.isdir(os.path.join(os.getcwd(), folder)):
-        img_num = len(os.listdir(os.path.join(os.getcwd(), folder)))
-        num_formatted = "0"*(3 - len(str(num))) + str(num) 
-        folder_formatted = folder + " "*(30 - len(folder))
-        print(f"{num_formatted} | {folder_formatted} | Number of imgs: {img_num}")
+    img_num = len(os.listdir(os.path.join(os.getcwd(), folder)))
+    num_formatted = "0"*(3 - len(str(num))) + str(num) 
+    folder_formatted = folder + " "*(30 - len(folder))
+    print(f"{num_formatted} | {folder_formatted} | Number of imgs: {img_num}")
 
 
 valid_input = False
