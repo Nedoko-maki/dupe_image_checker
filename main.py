@@ -1,7 +1,7 @@
 import os
 from PIL import Image, ImageStat
 
-Image.MAX_IMAGE_PIXELS = None # Disabling max img size, for unexpectedly big images. Do delete if you don't fully trust all your images.  
+Image.MAX_IMAGE_PIXELS = None # Disabling max img size, for unexpectedly big images. Do comment out if you don't fully trust all your images.  
 
 print("""
 The limitations of this program is that it can only detect exact duplicates.
@@ -45,7 +45,7 @@ printed = []
 for num, image in enumerate(image_files):
     _ = Image.open(os.path.join(image_folder, image))
     image_mean_list.append([image, ImageStat.Stat(_).mean])
-    if (round((100*num)/len(image_files))/10).is_integer() and round((100*num)/len(image_files)) not in printed: # Probably a bad way of doing % bar, but it works, without performance loss.
+    if (round((100*num)/len(image_files))/10).is_integer() and round((100*num)/len(image_files)) not in printed: # Probably a bad way of doing % bar, but it works, without noticable problems.
         print(f"Percent done processing: {round((100*num)/len(image_files))}%")
         printed.append(round((100*num)/len(image_files)))
 
