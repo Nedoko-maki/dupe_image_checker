@@ -9,7 +9,7 @@ If an image is identical, but slightly edited or something, it will not detect t
 
 GIFs and MP4s do not work.
 
-Additionally, the images should be in folders in the same directory as this .py file. (PIL should be installed too)
+Additionally, the images should be in folders in the same directory as this .py file. (PIL should be installed via pip too)
 """)
 
 folders = [_ for _ in os.listdir(os.getcwd()) if os.path.isdir(os.path.join(os.getcwd(), _))]
