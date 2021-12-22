@@ -1,5 +1,5 @@
 # dupe_image_checker
-December 2021:
+**December 2021:**
 
 Improved on this further, now it can compare and identify similar images/duplicates and group them accordingly, with a PyQt5 GUI interface.  
 Some work could be done on the strfex function, to be looked at. 
@@ -7,7 +7,7 @@ GIFs and MP4s are still not working, though GIFs shouldn't be too hard to implem
 
 The images should be in folders of the directory the main.pyw and dupe_image_lib.py files are in. 
 
-March 2021: 
+**March 2021:** 
 
 Python code for an optimised version of a duplicate image checker I found online on Google. Previous version did some processing that could just be listed and referenced later, so implementation and optimisation took not too long. 
 
