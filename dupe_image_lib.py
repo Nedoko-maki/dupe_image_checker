@@ -1,26 +1,28 @@
+import collections
 import copy
 import datetime
 import imagehash
 import json
 import traceback
+import multiprocessing as mp
 from pathlib import Path
 from PIL import Image
 
 
 class ImageStruct:
-    def __init__(self, directory: Path, emitters: dict):
+    def __init__(self, directory: Path, allowed_cpu_cores: int, pyqt_signals: dict):
 
         """
         An ImageStruct object, manages all image data and metadata.
 
         :param directory: pathlib Path object.
-        :param emitters: Dictionary that contains PyQt pyqtSignal signallers.
+        :param pyqt_signals: Dictionary that contains PyQt pyqtSignal signallers.
         """
 
         self.directory = directory
-        self.metadata = None
-        self.image_data = None
-        self.emitters = emitters
+        self.metadata, self.image_data = None, None
+        self.allowed_cpu_cores = allowed_cpu_cores
+        self.pyqt_signal_dict = pyqt_signals
 
     def load_data(self):
         """
@@ -47,7 +49,8 @@ class ImageStruct:
                 self.image_data = copy.deepcopy(json_data["image_data"])
 
                 if Path(self.metadata["directory"]) != self.directory:
-                    self.emitters["text_log"].emit("Warning: the given directory and the loaded directory are not the same!")
+                    self.pyqt_signal_dict["text_log"].emit(
+                        "Warning: the given directory and the loaded directory are not the same!")
 
             except WindowsError as e:
                 print(f"Error loading hashes: {e}")
@@ -57,15 +60,49 @@ class ImageStruct:
 
         """
         Generates a dict that contains a list of hashes, and creates new metadata in the ImageStruct object.
+        Multithreading processing of images!
 
         :param file_list: takes a list of files.
         :param grid_density: takes an integer value as the density of grid squares of hashes generated.
         :return: No return value
         """
 
+        self.pyqt_signal_dict["text_log"].emit("Loading image hashes...")
+
+        if mp.cpu_count() > 2:
+            proc_manager = ProcessManager(self.pyqt_signal_dict)
+            num_proc = self.allowed_cpu_cores
+            workload = split_list(file_list, num_proc)
+
+            self.pyqt_signal_dict["text_log"].emit(f"""{"-" * 30}
+CPU COUNT: {mp.cpu_count()}, PROCESS COUNT: {num_proc}""")
+
+            for pid, work_list in enumerate(workload):
+                self.pyqt_signal_dict["text_log"].emit(f"Starting process {pid}...")
+                proc_manager.run(pid, self.generate_data_func, self.directory, work_list, grid_density)
+
+            self.pyqt_signal_dict["text_log"].emit(f"""Returning from processes...
+{"-"*30}""")
+            return_dicts = proc_manager.wait()
+            img_data = merge_dicts(return_dicts)
+
+        else:
+            img_data = self.generate_data_func(self.directory, file_list,
+                                               grid_density, pyqt_signals=self.pyqt_signal_dict)
+
+        self.image_data = img_data
+        self.metadata = {"directory": str(self.directory),
+                         "time_of_creation": f"{datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+                         # dd/mm/yyyy hh:mm:ss
+                         "last_time_modified": f"{datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+                         "grid_density": grid_density}
+
+    @staticmethod
+    def generate_data_func(directory: Path, file_list: list, grid_density: int, queue=None, pid=None, pyqt_signals=None):
+
         output_hashes = dict()
         for num, image in enumerate(file_list, start=1):
-            _ = Image.open(Path(self.directory, image))
+            _ = Image.open(Path(directory, image))
             x, y = _.size
             hash_list = list()
             for x_grid in range(grid_density):  # -1 since we're going by intersections of the grid, not the grid itself
@@ -80,17 +117,18 @@ class ImageStruct:
             # looking at small sections of the image vs. the whole image
             # since the bg shouldn't change that much
 
-            output_hashes[image] = {"size": _.size, "average_hash": str(imagehash.average_hash(_)),
+            output_hashes[image] = {"filename": image, "size": _.size, "average_hash": str(imagehash.average_hash(_)),
                                     "hash_list": hash_list}
             _.close()
-            self.emitters["progress_bar"].emit(round(100*num/len(file_list)))
+            if queue is not None:
+                queue.put(Msg("pyqt_signal", ["progress_bar", round(100 * num / len(file_list))]))
+            else:
+                pyqt_signals["progress_bar"].emit(round(100 * num / len(file_list)))
+        if queue is not None:
+            queue.put(Msg("return_data", output_hashes))
+            queue.put(Msg("proc_terminate", pid))
 
-        self.image_data = output_hashes
-        self.metadata = {"directory": str(self.directory),
-                         "time_of_creation": f"{datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
-                         # dd/mm/yyyy hh:mm:ss
-                         "last_time_modified": f"{datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
-                         "grid_density": grid_density}
+        return output_hashes
 
     def save_data(self):
 
@@ -119,14 +157,82 @@ class ImageStruct:
             except OSError:
                 print(f"Creation of the directory 'hash_data' failed.")
         try:
-            self.emitters["text_log"].emit("Saving json file...")
+            self.pyqt_signal_dict["text_log"].emit("Saving json file...")
             with open(Path(self.directory, "hash_data", "fp_hash_data.json"), "w") as json_file:
                 json.dump(output_dict, json_file, indent=4)
                 json_file.close()
-            self.emitters["text_log"].emit("Saved!")
+            self.pyqt_signal_dict["text_log"].emit("Saved!")
         except:
-            self.emitters["text_log"].emit("Could not save json file.")
+            self.pyqt_signal_dict["text_log"].emit("Could not save json file.")
             traceback.print_exc()
+
+
+Msg = collections.namedtuple('Msg', ['event', 'data'])
+
+
+class ProcessManager:
+    def __init__(self, pyqt_signal: dict):
+
+        self.processes = {}
+        self.queue = mp.Queue()
+        self.pyqt_signal = pyqt_signal
+
+    @staticmethod
+    def _wrapper(func, pid, queue, args, kwargs):
+        func(*args, pid=pid, queue=queue, **kwargs)  # function execution
+
+    def run(self, pid, func, *args, **kwargs):
+        args2 = (func, pid, self.queue, args, kwargs)
+        proc = mp.Process(target=self._wrapper, args=args2)
+        self.processes[pid] = {"pid": pid, "process": proc, "terminated": False}  # saving processes in a dict
+        self.processes[pid]["process"].start()
+
+    def wait(self):  # waiting for processes to finish work.
+        return_list = []
+        terminated = False
+        while not terminated:
+            for _ in self.processes:
+
+                event, data = self.queue.get()
+
+                if event == "return_data":  # event conditionals
+                    return_list.append(data)
+                elif event == "pyqt_signal":
+                    self.pyqt_signal[data[0]].emit(data[1])  # can emit whatever PyQt signal depending on a list.
+                elif event == "proc_terminate":
+                    self.processes[data]["process"].join()  # process is terminated
+                    self.processes[data]["terminated"] = True
+
+                if all([self.processes[pid]["terminated"] for pid in self.processes]):
+                    terminated = True
+                    break
+
+        return return_list
+
+
+def split_list(item_list: list, divisor: int):
+    """
+    Splits a list into equal chunks, that works with remainders.
+
+    :param item_list: List of items to be divided.
+    :param divisor: Number of chunks the list is to be divided into.
+    :return: Returns a list of divided chunks.
+    """
+
+    divisor = min(divisor, len(item_list))
+    k, m = divmod(len(item_list), divisor)
+    return list((item_list[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(divisor)))
+
+
+def merge_dicts(dict_args):
+    """
+    Given any number of dictionaries, shallow copy and merge into a new dict,
+    precedence goes to key-value pairs in latter dictionaries.
+    """
+    result = {}
+    for dictionary in dict_args:
+        result = result | dictionary
+    return result
 
 
 def f_num0(value: int,
@@ -138,7 +244,6 @@ def f_num0(value: int,
 
 
 def display_folders():
-
     """
     **Depreciated. PyQt5 allows the ability to use QComboBoxes which replace the functionality of this method.**
 
@@ -222,10 +327,11 @@ def f_type_return(file, file_type_list: list):  # takes string and file type lis
 def rename_to_num(directory: Path, file_list: list, format_string: str, file_type_list: list):
     for num, file in enumerate(file_list):
         try:
-            Path(directory, file).rename(Path(directory, format_string+str(num)+f_type_return(file, file_type_list)))
+            Path(directory, file).rename(
+                Path(directory, format_string + str(num) + f_type_return(file, file_type_list)))
         except WindowsError:
             try:
-                Path(directory, file).rename(Path(directory, "_temp_"+str(num)+f_type_return(file, file_type_list)))
+                Path(directory, file).rename(Path(directory, "_temp_" + str(num) + f_type_return(file, file_type_list)))
             except Exception as e:
                 print(f"An exception has occured on iteration {num}: {e}")
         except Exception as e:
@@ -272,14 +378,10 @@ def strfex(expression: str, **kwargs) -> str:  # string format expression
 
 
 def check_json_exists(directory: Path):
-    if Path(directory, "hash_data").is_dir() and Path(directory, "hash_data", "fp_hash_data.json").is_file():
-        return True
-    else:
-        return False
+    return Path(directory, "hash_data").is_dir() and Path(directory, "hash_data", "fp_hash_data.json").is_file()
 
 
 def compare_hashes(hash_input_1: dict, hash_input_2: dict, kwargs):
-
     """
     Compares two dicts of hashes, and returns a true value if the number of successful matches exceed the success ratio.
 
@@ -307,19 +409,16 @@ def compare_hashes(hash_input_1: dict, hash_input_2: dict, kwargs):
         mode = "similar"
 
     if mode == "identical":
-        if hash_input_1["hash_list"] == hash_input_2["hash_list"]:
-            return True
-        else:
-            return False
+        return hash_input_1["average_hash"] == hash_input_2["average_hash"]
+        # return hash_input_1["hash_list"] == hash_input_2["hash_list"] <- original, if identical checking fails just
+        # reinstate this.
+
     elif mode == "similar":
         for index in range(len(hash_input_1["hash_list"])):
             if abs(hash_input_1["hash_list"][index] - hash_input_2["hash_list"][index]) < cutoff:
                 score += 1
 
-        if score >= round(len(hash_input_1["hash_list"]) * success_ratio):
-            return True
-        else:
-            return False
+        return score >= round(len(hash_input_1["hash_list"]) * success_ratio)
 
 
 def cross_compare_list(image_struct: ImageStruct, comparison_function, **kwargs) -> list:
@@ -337,12 +436,10 @@ def cross_compare_list(image_struct: ImageStruct, comparison_function, **kwargs)
     :return: Returns a 2 element list of [duplicate items, grouped duplicate items]
     """
 
-    text = {"identical": "perfect", "similar": "similar"}
-
     dupe_items = []
     g_dupe_items = []
     item_list = image_struct.image_data
-    image_struct.emitters["text_log"].emit(f"Cross checking for {text[kwargs['mode']]} duplicates...")
+    image_struct.pyqt_signal_dict["text_log"].emit(f"Cross checking for {kwargs['mode']} duplicates...")
     for num, item_1 in enumerate(item_list, start=1):
         group = []
         if item_1 not in dupe_items:
@@ -359,14 +456,13 @@ def cross_compare_list(image_struct: ImageStruct, comparison_function, **kwargs)
 
             if len(group) != 0:
                 g_dupe_items.append(group)
-        image_struct.emitters["progress_bar"].emit(round(100 * num / len(item_list)))
-    image_struct.emitters["text_log"].emit("Done!")
+        image_struct.pyqt_signal_dict["progress_bar"].emit(round(100 * num / len(item_list)))
+    image_struct.pyqt_signal_dict["text_log"].emit("Done!")
     return [dupe_items, g_dupe_items]
 
 
 def regroup_files(file_list: list, image_struct: ImageStruct,
                   type_list: list, expression="%grp%-%grp_num%"):
-
     """
 
     :param file_list: Takes a list of files.
@@ -382,15 +478,15 @@ def regroup_files(file_list: list, image_struct: ImageStruct,
                 if f_type_return(filename, type_list) in type_list:
                     Path(image_struct.directory, filename).rename(Path(image_struct.directory,
                                                                        strfex(expression, grp=i,
-                                                                           grp_num=i2) + f_type_return(filename,
-                                                                                                       type_list)))
+                                                                              grp_num=i2) + f_type_return(filename,
+                                                                                                          type_list)))
                     image_struct.image_data[
                         strfex(expression, grp=i, grp_num=i2) + f_type_return(filename, type_list)] = \
                         image_struct.image_data[filename]  # renaming the key associated with the filename.
                     del image_struct.image_data[filename]  # deleting old reference
             except Exception as e:
-                image_struct.emitters["text_log"].emit("regroup_files error: " + str(e))
-        image_struct.emitters["progress_bar"].emit(round(100 * (i + 1) / len(file_list)))
+                image_struct.pyqt_signal_dict["text_log"].emit("regroup_files error: " + str(e))
+        image_struct.pyqt_signal_dict["progress_bar"].emit(round(100 * (i + 1) / len(file_list)))
     image_struct.save_data()
 
 
@@ -398,7 +494,6 @@ def product(x): return x[0] * x[1]  # can be tuple/list
 
 
 def move_files(new_folder: str, file_list: list, image_struct: ImageStruct):
-
     """
 
     Moves a list of files to a subdirectory in the current working directory, then returns the altered ImageStruct
@@ -413,11 +508,11 @@ def move_files(new_folder: str, file_list: list, image_struct: ImageStruct):
     try:
         Path(image_struct.directory, new_folder).mkdir(exist_ok=True)
     except OSError:
-        image_struct.emitters["text_log"].emit(f"Creation of the directory '{new_folder}' failed.")
+        image_struct.pyqt_signal_dict["text_log"].emit(f"Creation of the directory '{new_folder}' failed.")
     else:
-        image_struct.emitters["text_log"].emit("Successfully created the directory.")
+        image_struct.pyqt_signal_dict["text_log"].emit("Successfully created the directory.")
 
-    image_struct.emitters["text_log"].emit("Moving duplicates...")
+    image_struct.pyqt_signal_dict["text_log"].emit("Moving duplicates...")
 
     try:
         if Path(image_struct.directory, new_folder).is_dir():
@@ -436,8 +531,8 @@ def move_files(new_folder: str, file_list: list, image_struct: ImageStruct):
                                 del image_struct.image_data[filename]
                                 break
 
-                image_struct.emitters["progress_bar"].emit(round(100 * num / len(file_list)))
-            image_struct.emitters["text_log"].emit("Done!")
+                image_struct.pyqt_signal_dict["progress_bar"].emit(round(100 * num / len(file_list)))
+            image_struct.pyqt_signal_dict["text_log"].emit("Done!")
     except Exception as e:
         print(e)
 
